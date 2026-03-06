@@ -4,7 +4,9 @@
 # FOR OFFICIAL USE ONLY (FOUO)
 # =============================================================================
 
-set -euo pipefail
+# NOTE: -e intentionally omitted — grep returns exit code 1 on no-match,
+# which would kill the script under 'set -e' before we can report the error.
+set -uo pipefail
 
 # ── Colors for output ────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -68,41 +70,84 @@ log "Found configuration file: ${CONF_PATH}"
 # ── Parse the conf file ──────────────────────────────────────────────────────
 header "Parsing Configuration File"
 
+# Robust parser: case-insensitive grep, splits on EITHER ':' or '=' as delimiter,
+# strips all leading/trailing whitespace. Handles keys with spaces or underscores.
 parse_field() {
-    grep -i "$1" "$CONF_PATH" | head -1 | sed 's/.*:\s*//' | tr -d '[:space:]'
+    local pattern="$1"
+    local occurrence="${2:-1}"   # which match to use (1=first, 2=second, etc.)
+    grep -i "$pattern" "$CONF_PATH" \
+        | sed -n "${occurrence}p" \
+        | sed 's/^[^:=]*[:=]//' \
+        | sed 's/^[[:space:]]*//' \
+        | sed 's/[[:space:]]*$//'
 }
 
+# Outer tunnel fields
 OUTER_PRIVATE_KEY=$(parse_field "Outer_Tunnel_Private_Key")
-OUTER_ADDRESS=$(parse_field "Outer Tunnel Interface Address")
-OUTER_LISTEN_PORT=$(parse_field "Outer Tunnel ListenPort")
-OUTER_MTU=$(parse_field "Outer Tunnel MTU")
+OUTER_ADDRESS=$(parse_field "Outer.*Tunnel.*Interface.*Address")
+OUTER_LISTEN_PORT=$(parse_field "Outer.*Tunnel.*ListenPort")
+OUTER_MTU=$(parse_field "Outer.*Tunnel.*MTU")
 OUTER_PEER_PUBKEY=$(parse_field "Outer_Tunnel_Public_Key")
 OUTER_ENDPOINT=$(parse_field "Redirector2_IP")
-OUTER_ALLOWED_IPS=$(parse_field "AllowedIPs \(Client Subnets\)" | head -1)
+OUTER_ALLOWED_IPS=$(parse_field "AllowedIPs" 1)   # first AllowedIPs line = outer peer
+OUTER_KEEPALIVE=$(parse_field "PersistentKeepalive" 1)
 
+# Inner tunnel fields
 INNER_PRIVATE_KEY=$(parse_field "Inner_Tunnel_Private_Key")
-INNER_ADDRESS=$(parse_field "Inner Tunnel Interface Address")
-INNER_LISTEN_PORT=$(parse_field "Inner Tunnel ListenPort")
-INNER_MTU_RAW=$(parse_field "Inner Tunnel MTU")
+INNER_ADDRESS=$(parse_field "Inner.*Tunnel.*Interface.*Address")
+INNER_LISTEN_PORT=$(parse_field "Inner.*Tunnel.*ListenPort")
+INNER_MTU_RAW=$(parse_field "Inner.*Tunnel.*MTU")
 INNER_PEER_PUBKEY=$(parse_field "Inner_Client_Public_Key")
-INNER_ENDPOINT=$(parse_field "Inner Tunnel Peer Endpoint")
+INNER_ENDPOINT=$(parse_field "Inner.*Tunnel.*Peer.*Endpoint")
+INNER_ALLOWED_IPS=$(parse_field "AllowedIPs" 2)   # second AllowedIPs line = inner peer
+INNER_KEEPALIVE=$(parse_field "PersistentKeepalive" 2)
 
-# Grab AllowedIPs lines separately since there are two
-INNER_ALLOWED_IPS=$(grep -i "AllowedIPs" "$CONF_PATH" | tail -1 | sed 's/.*:\s*//')
-
-# Handle MTU range (e.g. "1280-1340") — pick the lower value
+# Handle MTU range (e.g. "1280-1340") — use the lower value
 if [[ "$INNER_MTU_RAW" =~ ^([0-9]+)-[0-9]+$ ]]; then
     INNER_MTU="${BASH_REMATCH[1]}"
 else
     INNER_MTU="$INNER_MTU_RAW"
 fi
 
-# Grab PersistentKeepalive values
-OUTER_KEEPALIVE=$(grep -i "PersistentKeepalive" "$CONF_PATH" | head -1 | sed 's/.*=\s*//' | tr -d '[:space:]')
-INNER_KEEPALIVE=$(grep -i "PersistentKeepalive" "$CONF_PATH" | tail -1 | sed 's/.*=\s*//' | tr -d '[:space:]')
+# ── Validate parsed fields and print for confirmation ───────────────────────
+declare -A PARSED_FIELDS=(
+    ["Outer Private Key"]="$OUTER_PRIVATE_KEY"
+    ["Outer Address"]="$OUTER_ADDRESS"
+    ["Outer ListenPort"]="$OUTER_LISTEN_PORT"
+    ["Outer MTU"]="$OUTER_MTU"
+    ["Outer Peer PubKey"]="$OUTER_PEER_PUBKEY"
+    ["Outer Endpoint"]="$OUTER_ENDPOINT"
+    ["Outer AllowedIPs"]="$OUTER_ALLOWED_IPS"
+    ["Outer Keepalive"]="$OUTER_KEEPALIVE"
+    ["Inner Private Key"]="$INNER_PRIVATE_KEY"
+    ["Inner Address"]="$INNER_ADDRESS"
+    ["Inner ListenPort"]="$INNER_LISTEN_PORT"
+    ["Inner MTU"]="$INNER_MTU"
+    ["Inner Peer PubKey"]="$INNER_PEER_PUBKEY"
+    ["Inner Endpoint"]="$INNER_ENDPOINT"
+    ["Inner AllowedIPs"]="$INNER_ALLOWED_IPS"
+    ["Inner Keepalive"]="$INNER_KEEPALIVE"
+)
 
-log "Outer tunnel: address=${OUTER_ADDRESS}, port=${OUTER_LISTEN_PORT}"
-log "Inner tunnel: address=${INNER_ADDRESS}, port=${INNER_LISTEN_PORT}"
+PARSE_ERRORS=0
+for field in "${!PARSED_FIELDS[@]}"; do
+    val="${PARSED_FIELDS[$field]}"
+    if [[ -z "$val" ]]; then
+        warn "Could not parse: ${field}"
+        PARSE_ERRORS=$((PARSE_ERRORS + 1))
+    else
+        log "  ${field}: ${val}"
+    fi
+done
+
+if [[ "$PARSE_ERRORS" -gt 0 ]]; then
+    error "${PARSE_ERRORS} field(s) failed to parse. Check the conf file format at: ${CONF_PATH}"
+    error "Dumping raw file for inspection:"
+    cat "$CONF_PATH"
+    exit 1
+fi
+
+log "All fields parsed successfully."
 
 # ── Determine destination conf file names ────────────────────────────────────
 header "Determining WireGuard Interface Names"
