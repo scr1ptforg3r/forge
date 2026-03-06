@@ -1,7 +1,6 @@
 #!/bin/bash
 # =============================================================================
 # WireGuard Tunnel Auto-Build Script
-# FOR OFFICIAL USE ONLY (FOUO)
 # =============================================================================
 
 # NOTE: -e intentionally omitted — grep returns exit code 1 on no-match,
